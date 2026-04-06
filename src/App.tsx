@@ -39,8 +39,6 @@ import {
 import { GoogleGenAI, Type } from "@google/genai";
 import { AppState, ProductType, Style, TargetPlatform, LightingMood, AspectRatio, ResultItem } from './types';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-
 const STYLE_PREVIEWS: Record<Style, string> = {
   'Luxury': 'https://picsum.photos/seed/luxury/100/100',
   'Minimal': 'https://picsum.photos/seed/minimal/100/100',
@@ -116,22 +114,36 @@ function SnapStudioApp() {
     activeAccent: 'none',
     isTryOnMode: false,
     lowPowerMode: false,
+    userApiKey: null,
   });
   const [isDragging, setIsDragging] = useState(false);
   const [refineInput, setRefineInput] = useState('');
   const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showComparison, setShowComparison] = useState(false);
   const [isZoomed, setIsZoomed] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Helper to get the active AI instance
+  const getAI = (customKey?: string) => {
+    const key = customKey || state.userApiKey || process.env.GEMINI_API_KEY || '';
+    if (!key) throw new Error("API Key Required. Please add your Gemini API key in settings.");
+    return new GoogleGenAI({ apiKey: key });
+  };
+
   // Load history and settings from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('snapstudio_history');
     const savedEco = localStorage.getItem('snapstudio_eco_mode');
+    const savedKey = localStorage.getItem('snapstudio_user_key');
     
     if (savedEco) {
       setState(prev => ({ ...prev, lowPowerMode: savedEco === 'true' }));
+    }
+
+    if (savedKey) {
+      setState(prev => ({ ...prev, userApiKey: savedKey }));
     }
 
     if (saved) {
@@ -154,6 +166,14 @@ function SnapStudioApp() {
   useEffect(() => {
     localStorage.setItem('snapstudio_eco_mode', state.lowPowerMode.toString());
   }, [state.lowPowerMode]);
+
+  useEffect(() => {
+    if (state.userApiKey) {
+      localStorage.setItem('snapstudio_user_key', state.userApiKey);
+    } else {
+      localStorage.removeItem('snapstudio_user_key');
+    }
+  }, [state.userApiKey]);
 
   useEffect(() => {
     const saveHistory = (data: any[]) => {
@@ -222,6 +242,7 @@ function SnapStudioApp() {
       results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: true } : res)
     }));
     try {
+      const aiInstance = getAI();
       const analysisPrompt = `Analyze this photoshoot image for a ${state.productType || 'Product'} targeting ${state.targetPlatform || 'Instagram'}. 
         Style: ${state.style}, Lighting: ${state.lighting}.
         
@@ -241,7 +262,7 @@ function SnapStudioApp() {
         The focusGroup key should be an array of 3 objects with keys: name, avatar, feedback, sentiment (positive/neutral/negative).
         The heatmapData key should be an array of objects with keys: x, y, intensity.`;
 
-      const analysisResponse = await ai.models.generateContent({
+      const analysisResponse = await aiInstance.models.generateContent({
         model: retries === 0 ? 'gemini-3-flash-preview' : 'gemini-3.1-flash-lite-preview', // Fallback to standard flash on final retry
         contents: [
           { text: analysisPrompt },
@@ -323,6 +344,7 @@ function SnapStudioApp() {
     setState(prev => ({ ...prev, step: 'processing' }));
 
     try {
+      const aiInstance = getAI();
       const basePrompt = state.isTryOnMode ? `
         VIRTUAL TRY-ON MODE:
         Take the product from Image 1 and realistically place it on the person in Image 2.
@@ -379,6 +401,7 @@ function SnapStudioApp() {
       
       const generateSingleImage = async (v: any, index: number, retries = 3): Promise<string> => {
         try {
+          const aiInstance = getAI();
           const parts: any[] = [
             { inlineData: { data: state.productImage!.split(',')[1], mimeType: 'image/png' } },
             { text: v.prompt }
@@ -388,7 +411,7 @@ function SnapStudioApp() {
             parts.push({ inlineData: { data: state.userImage.split(',')[1], mimeType: 'image/png' } });
           }
 
-          const response = await ai.models.generateContent({
+          const response = await aiInstance.models.generateContent({
             model: 'gemini-2.5-flash-image',
             contents: { parts },
             config: {
@@ -468,11 +491,16 @@ function SnapStudioApp() {
                           error?.message?.includes('429') || 
                           error?.message?.includes('quota');
       
-      const errorMessage = isQuotaError 
-        ? "AI Quota Exceeded. Please wait a minute before trying again. This happens when the AI is processing too many requests."
-        : "Something went wrong during generation. Please try again.";
+      const isKeyError = error?.message?.includes('API Key Required');
+      
+      const errorMessage = isKeyError
+        ? "API Key Required. Please click the key icon in the top right to add your Gemini API key."
+        : isQuotaError 
+          ? "AI Quota Exceeded. Please wait a minute before trying again. This happens when the AI is processing too many requests."
+          : "Something went wrong during generation. Please try again.";
 
       setState(prev => ({ ...prev, step: 'input', error: errorMessage }));
+      if (isKeyError) setShowSettings(true);
     }
   };
 
@@ -500,6 +528,110 @@ function SnapStudioApp() {
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 overflow-x-hidden relative">
+      {/* Top Navigation / Actions */}
+      <div className="fixed top-8 right-8 flex items-center gap-3 z-30">
+        <button 
+          onClick={() => setShowSettings(true)}
+          className={`p-3 rounded-full border transition-all ${state.userApiKey ? 'bg-green-500/10 border-green-500/50 text-green-500' : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10'}`}
+          title="AI Settings"
+        >
+          <Zap className={`w-5 h-5 ${state.userApiKey ? 'fill-current' : ''}`} />
+        </button>
+        <button 
+          onClick={() => setShowHistory(true)}
+          className="p-3 rounded-full bg-white/5 border border-white/10 text-white/40 hover:bg-white/10 transition-all"
+          title="History"
+        >
+          <History className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSettings(false)}
+              className="fixed inset-0 bg-black/80 backdrop-blur-xl z-[60]"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-zinc-950 border border-white/10 rounded-[2.5rem] p-8 z-[70] shadow-2xl"
+            >
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-white text-black rounded-xl flex items-center justify-center">
+                      <Zap className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-display font-bold">AI Settings</h3>
+                      <p className="text-xs text-zinc-500">Manage your API credits</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-white/5 rounded-full">
+                    <ArrowLeft className="w-5 h-5 rotate-180" />
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="p-4 bg-white/5 rounded-2xl border border-white/10 space-y-2">
+                    <p className="text-xs font-medium text-zinc-400">Gemini API Key</p>
+                    <div className="relative">
+                      <input 
+                        type="password"
+                        placeholder="Enter your API key..."
+                        value={state.userApiKey || ''}
+                        onChange={(e) => setState(prev => ({ ...prev, userApiKey: e.target.value || null }))}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-white/30 transition-all font-mono"
+                      />
+                      {state.userApiKey && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                          <CheckCircle2 className="w-4 h-4 text-green-500" />
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-zinc-500 leading-relaxed">
+                      Your key is stored locally in your browser. Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-white hover:underline inline-flex items-center gap-1">AI Studio <ExternalLink className="w-2 h-2" /></a>
+                    </p>
+                  </div>
+
+                  <div className="p-4 bg-amber-500/5 rounded-2xl border border-amber-500/10">
+                    <p className="text-[10px] text-amber-500/80 leading-relaxed">
+                      By using your own API key, you won't be limited by the developer's credits. This app will remain 100% free for you to use.
+                    </p>
+                  </div>
+
+                  <button 
+                    onClick={() => setShowSettings(false)}
+                    className="btn-primary w-full py-4"
+                  >
+                    Save & Close
+                  </button>
+                  
+                  {state.userApiKey && (
+                    <button 
+                      onClick={() => {
+                        setState(prev => ({ ...prev, userApiKey: null }));
+                        localStorage.removeItem('snapstudio_user_key');
+                      }}
+                      className="w-full text-[10px] text-red-500/50 hover:text-red-500 font-bold uppercase tracking-widest transition-colors"
+                    >
+                      Clear Saved Key
+                    </button>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
       {/* History Sidebar */}
       <AnimatePresence>
         {showHistory && (
@@ -623,6 +755,27 @@ function SnapStudioApp() {
                 View History
               </button>
             </div>
+
+            {/* Credit Info Note */}
+            {!state.userApiKey && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1 }}
+                className="max-w-md mx-auto p-4 rounded-2xl bg-white/5 border border-white/10 flex items-start gap-3 text-left"
+              >
+                <div className="p-2 bg-amber-500/10 rounded-lg">
+                  <Zap className="w-4 h-4 text-amber-500" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs font-bold text-white uppercase tracking-widest">Free Forever Mode</p>
+                  <p className="text-[10px] text-zinc-400 leading-relaxed">
+                    To keep this app 100% free and unlimited, we recommend adding your own Gemini API key. 
+                    Click the <Zap className="w-2 h-2 inline-block mx-0.5" /> icon in the top right to get started.
+                  </p>
+                </div>
+              </motion.div>
+            )}
           </motion.div>
         )}
 
@@ -951,6 +1104,24 @@ function SnapStudioApp() {
                     </select>
                   </div>
                 </div>
+              </div>
+
+              {/* Credit Status Indicator */}
+              <div className="flex items-center justify-between px-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${state.userApiKey ? 'bg-green-500 animate-pulse' : 'bg-amber-500'}`} />
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                    {state.userApiKey ? 'Using Personal Credits' : 'Using Shared Credits'}
+                  </span>
+                </div>
+                {!state.userApiKey && (
+                  <button 
+                    onClick={() => setShowSettings(true)}
+                    className="text-[10px] font-bold text-white hover:underline uppercase tracking-widest"
+                  >
+                    Add Your Key
+                  </button>
+                )}
               </div>
 
               <button 

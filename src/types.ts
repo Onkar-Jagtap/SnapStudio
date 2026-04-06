@@ -64,4 +64,5 @@ export interface AppState {
   activeAccent: LightingAccent;
   isTryOnMode: boolean;
   lowPowerMode: boolean;
+  userApiKey: string | null;
 }
