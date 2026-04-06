@@ -37,6 +37,7 @@ export interface ResultItem {
   accent?: LightingAccent;
   focusGroup?: FocusGroupPersona[];
   heatmapData?: HeatmapPoint[];
+  isAnalyzing?: boolean;
 }
 
 export interface AppState {

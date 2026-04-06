@@ -1,5 +1,7 @@
 {
   "name": "SnapStudio AI",
-  "description": "Premium AI-powered product photoshoot generator for high-end marketing visuals.",
-  "requestFramePermissions": []
+  "description": "Professional AI Product Photography Studio with Virtual Gaffer, Synthetic Focus Group, and Eye-Tracking Heatmaps.",
+  "requestFramePermissions": [
+    "camera"
+  ]
 }

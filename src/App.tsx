@@ -205,6 +205,109 @@ function SnapStudioApp() {
     if (file) handleFile(file);
   };
 
+  const generateAnalysis = async (resultId: string, image: string, retries = 3): Promise<void> => {
+    setState(prev => ({
+      ...prev,
+      results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: true } : res)
+    }));
+    try {
+      const analysisPrompt = `Analyze this photoshoot image for a ${state.productType || 'Product'} targeting ${state.targetPlatform || 'Instagram'}. 
+        Style: ${state.style}, Lighting: ${state.lighting}.
+        
+        Provide:
+        1. Instagram caption with hashtags.
+        2. Punchy ad copy line.
+        3. Conversion Score (0-100) based on visual appeal and platform best practices.
+        4. A 1-sentence marketing analysis of why it will convert.
+        5. A "Synthetic Focus Group" feedback from 3 distinct personas:
+           - "The Skeptical Gen Z" (Values authenticity, raw vibes, sustainability)
+           - "The Luxury Collector" (Values status, premium details, exclusivity)
+           - "The Budget-Conscious Parent" (Values durability, practicality, value)
+        6. "AI Eye-Tracking Heatmap Data":
+           - Provide 5-8 "Hot Zones" (x, y coordinates from 0-100 and intensity from 0.1-1.0) where a human eye would land first.
+           
+        Return as a JSON object with keys: instagram, adCopy, score, analysis, focusGroup, heatmapData.
+        The focusGroup key should be an array of 3 objects with keys: name, avatar, feedback, sentiment (positive/neutral/negative).
+        The heatmapData key should be an array of objects with keys: x, y, intensity.`;
+
+      const analysisResponse = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [
+          { text: analysisPrompt },
+          { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              instagram: { type: Type.STRING },
+              adCopy: { type: Type.STRING },
+              score: { type: Type.NUMBER },
+              analysis: { type: Type.STRING },
+              focusGroup: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    avatar: { type: Type.STRING },
+                    feedback: { type: Type.STRING },
+                    sentiment: { type: Type.STRING }
+                  },
+                  required: ["name", "avatar", "feedback", "sentiment"]
+                }
+              },
+              heatmapData: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                    intensity: { type: Type.NUMBER }
+                  },
+                  required: ["x", "y", "intensity"]
+                }
+              }
+            },
+            required: ["instagram", "adCopy", "score", "analysis", "focusGroup", "heatmapData"]
+          }
+        }
+      });
+
+      const analysis = JSON.parse(analysisResponse.text || '{}');
+      
+      setState(prev => ({
+        ...prev,
+        results: prev.results.map(res => res.id === resultId ? {
+          ...res,
+          caption: { instagram: analysis.instagram, adCopy: analysis.adCopy },
+          score: analysis.score,
+          analysis: analysis.analysis,
+          focusGroup: analysis.focusGroup,
+          heatmapData: analysis.heatmapData,
+          isAnalyzing: false,
+        } : res)
+      }));
+    } catch (error: any) {
+      const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
+                          error?.message?.includes('429') || 
+                          error?.message?.includes('quota');
+
+      if (isQuotaError && retries > 0) {
+        const waitTime = (4 - retries) * 4000;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        return generateAnalysis(resultId, image, retries - 1);
+      }
+      console.error("Analysis failed:", error);
+      setState(prev => ({
+        ...prev,
+        results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: false } : res)
+      }));
+    }
+  };
+
   const generatePhotoshoot = async (isRefining = false) => {
     setState(prev => ({ ...prev, step: 'processing' }));
 
@@ -257,27 +360,6 @@ function SnapStudioApp() {
         { chapter: undefined, prompt: `${basePrompt} Variation 3: Close-up detail.` },
         { chapter: undefined, prompt: `${basePrompt} Variation 4: Creative artistic shot.` }
       ];
-
-      const imagePromises = variationPrompts.map(v => {
-        const parts: any[] = [
-          { inlineData: { data: state.productImage!.split(',')[1], mimeType: 'image/png' } },
-          { text: v.prompt }
-        ];
-
-        if (state.isTryOnMode && state.userImage) {
-          parts.push({ inlineData: { data: state.userImage.split(',')[1], mimeType: 'image/png' } });
-        }
-
-        return ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
-          contents: { parts },
-          config: {
-            imageConfig: {
-              aspectRatio: state.aspectRatio as any
-            }
-          }
-        });
-      });
 
       // Sequential Image Generation with Retry and Backoff to avoid 429
       const imageUrls: string[] = [];
@@ -335,115 +417,18 @@ function SnapStudioApp() {
 
       if (imageUrls.length === 0) throw new Error("No images generated");
 
-      // Consolidated Marketing Audit + Synthetic Focus Group with Retry Logic
-      const analyzeWithRetry = async (images: string[], retries = 3): Promise<any[]> => {
-        try {
-          const analysisPrompt = `Analyze these 4 photoshoot variations for a ${state.productType || 'Product'} targeting ${state.targetPlatform || 'Instagram'}. 
-            Style: ${state.style}, Lighting: ${state.lighting}.
-            
-            For EACH image, provide:
-            1. Instagram caption with hashtags.
-            2. Punchy ad copy line.
-            3. Conversion Score (0-100) based on visual appeal and platform best practices.
-            4. A 1-sentence marketing analysis of why it will convert.
-            5. A "Synthetic Focus Group" feedback from 3 distinct personas:
-               - "The Skeptical Gen Z" (Values authenticity, raw vibes, sustainability)
-               - "The Luxury Collector" (Values status, premium details, exclusivity)
-               - "The Budget-Conscious Parent" (Values durability, practicality, value)
-            6. "AI Eye-Tracking Heatmap Data":
-               - Provide 5-8 "Hot Zones" (x, y coordinates from 0-100 and intensity from 0.1-1.0) where a human eye would land first.
-               
-            Return as a JSON array of 4 objects with keys: instagram, adCopy, score, analysis, focusGroup, heatmapData.
-            The focusGroup key should be an array of 3 objects with keys: name, avatar, feedback, sentiment (positive/neutral/negative).
-            The heatmapData key should be an array of objects with keys: x, y, intensity.`;
-
-          const analysisResponse = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: [
-              { text: analysisPrompt },
-              ...images.map(img => ({ inlineData: { data: img.split(',')[1], mimeType: 'image/png' } }))
-            ],
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    instagram: { type: Type.STRING },
-                    adCopy: { type: Type.STRING },
-                    score: { type: Type.NUMBER },
-                    analysis: { type: Type.STRING },
-                    focusGroup: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          name: { type: Type.STRING },
-                          avatar: { type: Type.STRING },
-                          feedback: { type: Type.STRING },
-                          sentiment: { type: Type.STRING }
-                        },
-                        required: ["name", "avatar", "feedback", "sentiment"]
-                      }
-                    },
-                    heatmapData: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          x: { type: Type.NUMBER },
-                          y: { type: Type.NUMBER },
-                          intensity: { type: Type.NUMBER }
-                        },
-                        required: ["x", "y", "intensity"]
-                      }
-                    }
-                  },
-                  required: ["instagram", "adCopy", "score", "analysis", "focusGroup", "heatmapData"]
-                }
-              }
-            }
-          });
-          return JSON.parse(analysisResponse.text || '[]');
-        } catch (error: any) {
-          const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
-                              error?.message?.includes('429') || 
-                              error?.message?.includes('quota');
-
-          if (isQuotaError && retries > 0) {
-            const waitTime = (4 - retries) * 4000;
-            console.warn(`Analysis quota hit, retrying in ${waitTime}ms...`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            return analyzeWithRetry(images, retries - 1);
-          }
-          throw error;
-        }
-      };
-
-      const allAnalysisData = await analyzeWithRetry(imageUrls);
-
       const newResults: ResultItem[] = imageUrls.map((url, i) => {
-        const analysis = allAnalysisData[i] || {
-          instagram: "Caption generation failed.",
-          adCopy: "Ad copy generation failed.",
-          score: 0,
-          analysis: "Analysis failed.",
-          focusGroup: [],
-          heatmapData: []
-        };
-
         return {
           id: Math.random().toString(36).substr(2, 9),
           image: url,
           caption: {
-            instagram: analysis.instagram,
-            adCopy: analysis.adCopy
+            instagram: "",
+            adCopy: ""
           },
-          score: analysis.score,
-          analysis: analysis.analysis,
-          focusGroup: analysis.focusGroup,
-          heatmapData: analysis.heatmapData,
+          score: 0,
+          analysis: "",
+          focusGroup: [],
+          heatmapData: [],
           chapter: variationPrompts[i].chapter as any,
           style: state.style!,
           lighting: state.lighting!,
@@ -460,6 +445,9 @@ function SnapStudioApp() {
         history: [...newResults, ...prev.history].slice(0, 4), // Limited to 4 items
       }));
       setRefineInput('');
+
+      // Auto-trigger analysis for the first variation
+      generateAnalysis(newResults[0].id, newResults[0].image);
 
     } catch (error: any) {
       console.error("Generation failed:", error);
@@ -1340,27 +1328,51 @@ function SnapStudioApp() {
 
                   {/* Synthetic Focus Group */}
                   <div className="pt-4 space-y-4 border-t border-white/10">
-                    <div className="flex items-center gap-2 text-white/60">
-                      <User className="w-4 h-4" />
-                      <span className="text-xs font-bold uppercase tracking-widest">Synthetic Focus Group</span>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-white/60">
+                        <User className="w-4 h-4" />
+                        <span className="text-xs font-bold uppercase tracking-widest">Synthetic Focus Group</span>
+                      </div>
+                      {!state.results[state.currentResultIndex]?.score && (
+                        <button 
+                          onClick={() => generateAnalysis(state.results[state.currentResultIndex].id, state.results[state.currentResultIndex].image)}
+                          disabled={state.results[state.currentResultIndex]?.isAnalyzing}
+                          className="text-[10px] font-bold text-white bg-white/10 px-3 py-1 rounded-full hover:bg-white/20 transition-all flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {state.results[state.currentResultIndex]?.isAnalyzing ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              Analyzing...
+                            </>
+                          ) : (
+                            <>
+                              <Zap className="w-3 h-3" />
+                              Run AI Audit
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
-                    <div className="space-y-3">
+                    <div className="space-y-4">
                       {state.results[state.currentResultIndex]?.focusGroup?.map((persona, idx) => (
                         <motion.div 
                           key={persona.name}
-                          initial={{ opacity: 0, x: -10 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: 0.5 + (idx * 0.1) }}
-                          className="bg-black/40 p-3 rounded-xl border border-white/5 space-y-2"
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: 0.2 + (idx * 0.1) }}
+                          className="bg-black/40 p-5 rounded-2xl border border-white/5 space-y-3"
                         >
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <div className="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] font-bold text-white">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white border border-white/10">
                                 {persona.name.charAt(0)}
                               </div>
-                              <span className="text-[10px] font-bold text-white/80">{persona.name}</span>
+                              <div className="flex flex-col">
+                                <span className="text-xs font-bold text-white">{persona.name}</span>
+                                <span className="text-[9px] text-zinc-500 uppercase tracking-tighter">Persona Analysis</span>
+                              </div>
                             </div>
-                            <div className={`px-2 py-0.5 rounded-full text-[8px] font-bold uppercase ${
+                            <div className={`px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider ${
                               persona.sentiment === 'positive' ? 'bg-green-500/20 text-green-400' :
                               persona.sentiment === 'negative' ? 'bg-red-500/20 text-red-400' :
                               'bg-zinc-500/20 text-zinc-400'
@@ -1368,14 +1380,16 @@ function SnapStudioApp() {
                               {persona.sentiment}
                             </div>
                           </div>
-                          <p className="text-[11px] text-zinc-400 leading-relaxed italic">
+                          <p className="text-sm text-zinc-300 leading-relaxed font-medium italic">
                             "{persona.feedback}"
                           </p>
                         </motion.div>
                       ))}
                       {(!state.results[state.currentResultIndex]?.focusGroup || state.results[state.currentResultIndex]?.focusGroup.length === 0) && (
-                        <div className="text-center py-4">
-                          <p className="text-[10px] text-white/20 uppercase font-bold tracking-widest">Simulating audience response...</p>
+                        <div className="text-center py-8 bg-black/20 rounded-2xl border border-dashed border-white/5">
+                          <p className="text-[10px] text-white/30 uppercase font-bold tracking-widest">
+                            {state.results[state.currentResultIndex]?.isAnalyzing ? "AI is processing audience response..." : state.results[state.currentResultIndex]?.score === 0 ? "Audit required for this variation" : "Simulating audience response..."}
+                          </p>
                         </div>
                       )}
                     </div>
