@@ -115,6 +115,7 @@ function SnapStudioApp() {
     addHumanTouch: false,
     activeAccent: 'none',
     isTryOnMode: false,
+    lowPowerMode: false,
   });
   const [isDragging, setIsDragging] = useState(false);
   const [refineInput, setRefineInput] = useState('');
@@ -124,9 +125,15 @@ function SnapStudioApp() {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load history from localStorage with 1-hour expiration check
+  // Load history and settings from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('snapstudio_history');
+    const savedEco = localStorage.getItem('snapstudio_eco_mode');
+    
+    if (savedEco) {
+      setState(prev => ({ ...prev, lowPowerMode: savedEco === 'true' }));
+    }
+
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -143,7 +150,11 @@ function SnapStudioApp() {
     }
   }, []);
 
-  // Save history to localStorage with quota handling
+  // Save history and settings to localStorage
+  useEffect(() => {
+    localStorage.setItem('snapstudio_eco_mode', state.lowPowerMode.toString());
+  }, [state.lowPowerMode]);
+
   useEffect(() => {
     const saveHistory = (data: any[]) => {
       try {
@@ -231,7 +242,7 @@ function SnapStudioApp() {
         The heatmapData key should be an array of objects with keys: x, y, intensity.`;
 
       const analysisResponse = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: retries === 0 ? 'gemini-3-flash-preview' : 'gemini-3.1-flash-lite-preview', // Fallback to standard flash on final retry
         contents: [
           { text: analysisPrompt },
           { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
@@ -349,7 +360,9 @@ function SnapStudioApp() {
       `;
 
       // Define variations or chapters
-      const variationPrompts = state.isCampaignMode && !state.isTryOnMode ? [
+      const variationPrompts = state.lowPowerMode ? [
+        { chapter: undefined, prompt: `${basePrompt} Variation 1: Main composition.` }
+      ] : state.isCampaignMode && !state.isTryOnMode ? [
         { chapter: 'Teaser', prompt: `${basePrompt} CHAPTER: TEASER. Moody, close-up, mysterious, high-contrast lighting, tight crop on a detail.` },
         { chapter: 'Hero', prompt: `${basePrompt} CHAPTER: HERO. Luxury studio setup, clear product view, centered, perfect lighting, professional catalog style.` },
         { chapter: 'Lifestyle', prompt: `${basePrompt} CHAPTER: LIFESTYLE. In-use setting, natural environment, warm lighting, lifestyle context matching the product category.` },
@@ -907,7 +920,27 @@ function SnapStudioApp() {
                   </div>
 
                   <div className="space-y-3">
-                    <label className="text-sm font-medium text-zinc-400">Target Platform</label>
+                    <label className="text-sm font-medium text-zinc-400 flex items-center justify-between">
+                      <span className="flex items-center gap-2"><Zap className="w-3 h-3" /> Eco Mode (Save Credits)</span>
+                      <button 
+                        onClick={() => setState(prev => ({ ...prev, lowPowerMode: !prev.lowPowerMode }))}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${state.lowPowerMode ? 'bg-amber-500' : 'bg-zinc-800'}`}
+                      >
+                        <motion.div 
+                          animate={{ x: state.lowPowerMode ? 22 : 2 }}
+                          className={`absolute top-1 w-3 h-3 rounded-full ${state.lowPowerMode ? 'bg-white' : 'bg-zinc-500'}`}
+                        />
+                      </button>
+                    </label>
+                    <p className="text-[10px] text-zinc-500 leading-tight">
+                      Generates 1 high-quality variation instead of 4 to save AI generation limits.
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-sm font-medium text-zinc-400 flex items-center justify-between">
+                      <span className="flex items-center gap-2"><Target className="w-3 h-3" /> Target Platform</span>
+                    </label>
                     <select 
                       className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-zinc-500 transition-colors appearance-none"
                       onChange={(e) => setState(prev => ({ ...prev, targetPlatform: e.target.value as TargetPlatform }))}
@@ -924,7 +957,7 @@ function SnapStudioApp() {
                 onClick={() => generatePhotoshoot()}
                 className="btn-primary w-full flex items-center justify-center gap-2 py-5"
               >
-                Generate 4 Variations
+                {state.lowPowerMode ? 'Generate 1 Variation' : 'Generate 4 Variations'}
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
@@ -962,7 +995,7 @@ function SnapStudioApp() {
                   "Detecting category & context",
                   "Selecting best environment",
                   "Applying lighting & composition",
-                  "Rendering 4 high-quality variations"
+                  state.lowPowerMode ? "Rendering 1 high-quality variation" : "Rendering 4 high-quality variations"
                 ].map((step, i) => (
                   <motion.div 
                     key={step}

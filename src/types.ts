@@ -63,4 +63,5 @@ export interface AppState {
   addHumanTouch: boolean;
   activeAccent: LightingAccent;
   isTryOnMode: boolean;
+  lowPowerMode: boolean;
 }
