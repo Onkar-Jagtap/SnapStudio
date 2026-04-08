@@ -128,8 +128,8 @@ function SnapStudioApp() {
 
   // Helper to get the active AI instance
   const getAI = (customKey?: string) => {
-    const key = customKey || state.userApiKey || process.env.GEMINI_API_KEY || '';
-    if (!key) throw new Error("API Key Required. Please add your Gemini API key in settings.");
+    const key = customKey || state.userApiKey || '';
+    if (!key) throw new Error("API Key Required. Please click the ⚡ icon in the top right to add your own Gemini API key.");
     return new GoogleGenAI({ apiKey: key });
   };
 
@@ -580,14 +580,29 @@ function SnapStudioApp() {
                 </div>
 
                 <div className="space-y-4">
-                  <div className="p-4 bg-white/5 rounded-2xl border border-white/10 space-y-2">
-                    <p className="text-xs font-medium text-zinc-400">Gemini API Key</p>
+                  <div className="p-4 bg-white/5 rounded-2xl border border-white/10 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">Gemini API Key</p>
+                      <a 
+                        href="https://aistudio.google.com/app/apikey" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-[10px] text-white hover:underline flex items-center gap-1"
+                      >
+                        Get free key <ExternalLink className="w-2 h-2" />
+                      </a>
+                    </div>
                     <div className="relative">
                       <input 
                         type="password"
-                        placeholder="Enter your API key..."
+                        placeholder="Paste your API key here..."
                         value={state.userApiKey || ''}
-                        onChange={(e) => setState(prev => ({ ...prev, userApiKey: e.target.value || null }))}
+                        onChange={(e) => {
+                          const val = e.target.value.trim();
+                          setState(prev => ({ ...prev, userApiKey: val || null }));
+                          if (val) localStorage.setItem('snapstudio_user_key', val);
+                          else localStorage.removeItem('snapstudio_user_key');
+                        }}
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-white/30 transition-all font-mono"
                       />
                       {state.userApiKey && (
@@ -597,13 +612,16 @@ function SnapStudioApp() {
                       )}
                     </div>
                     <p className="text-[10px] text-zinc-500 leading-relaxed">
-                      Your key is stored locally in your browser. Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-white hover:underline inline-flex items-center gap-1">AI Studio <ExternalLink className="w-2 h-2" /></a>
+                      <b>Privacy Note:</b> Your key is stored only in your browser's local storage. It is never sent to our servers.
                     </p>
                   </div>
 
                   <div className="p-4 bg-amber-500/5 rounded-2xl border border-amber-500/10">
                     <p className="text-[10px] text-amber-500/80 leading-relaxed">
-                      Note: The Gemini free tier has strict limits (approx. 2-5 images per minute). If you see "Quota Reached", simply wait 60 seconds. Using your own key helps avoid shared limits.
+                      <b>Why use your own key?</b><br />
+                      1. <b>Always Free:</b> Use your own free tier limits (approx. 2-5 images/min).<br />
+                      2. <b>No Shared Limits:</b> You won't be blocked by other users' activity.<br />
+                      3. <b>Privacy:</b> You have full control over your AI usage data.
                     </p>
                   </div>
 
@@ -756,23 +774,42 @@ function SnapStudioApp() {
               </button>
             </div>
 
-            {/* Credit Info Note */}
+            {/* BYOK Mandatory Note */}
             {!state.userApiKey && (
               <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 1 }}
-                className="max-w-md mx-auto p-4 rounded-2xl bg-white/5 border border-white/10 flex items-start gap-3 text-left"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="max-w-md mx-auto p-6 rounded-[2rem] bg-amber-500/10 border border-amber-500/20 space-y-4"
               >
-                <div className="p-2 bg-amber-500/10 rounded-lg">
-                  <Zap className="w-4 h-4 text-amber-500" />
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-amber-500/20 rounded-xl">
+                    <Zap className="w-5 h-5 text-amber-500" />
+                  </div>
+                  <div className="text-left">
+                    <p className="text-sm font-bold text-white uppercase tracking-widest">API Key Required</p>
+                    <p className="text-[10px] text-zinc-400">To keep this app free and private for everyone.</p>
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <p className="text-xs font-bold text-white uppercase tracking-widest">Free Forever Mode</p>
-                  <p className="text-[10px] text-zinc-400 leading-relaxed">
-                    To keep this app 100% free and unlimited, we recommend adding your own Gemini API key. 
-                    Click the <Zap className="w-2 h-2 inline-block mx-0.5" /> icon in the top right to get started.
-                  </p>
+                <p className="text-xs text-zinc-300 text-left leading-relaxed">
+                  This app uses a <b>"Bring Your Own Key"</b> model. Your key stays in your browser and uses your own free limits.
+                </p>
+                <div className="flex flex-col gap-2">
+                  <a 
+                    href="https://aistudio.google.com/app/apikey" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between p-3 bg-white/5 hover:bg-white/10 rounded-xl border border-white/10 transition-all group"
+                  >
+                    <span className="text-[10px] font-bold uppercase tracking-wider">1. Get Free Key at AI Studio</span>
+                    <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                  </a>
+                  <button 
+                    onClick={() => setShowSettings(true)}
+                    className="flex items-center justify-between p-3 bg-white text-black hover:bg-zinc-200 rounded-xl transition-all"
+                  >
+                    <span className="text-[10px] font-bold uppercase tracking-wider">2. Add Key to App</span>
+                    <ChevronRight className="w-3 h-3" />
+                  </button>
                 </div>
               </motion.div>
             )}
@@ -1109,27 +1146,34 @@ function SnapStudioApp() {
               {/* Credit Status Indicator */}
               <div className="flex items-center justify-between px-2 mb-2">
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${state.userApiKey ? 'bg-green-500 animate-pulse' : 'bg-amber-500'}`} />
+                  <div className={`w-2 h-2 rounded-full ${state.userApiKey ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
                   <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-                    {state.userApiKey ? 'Using Personal Credits' : 'Using Shared Credits'}
+                    {state.userApiKey ? 'Personal Key Active' : 'API Key Required'}
                   </span>
                 </div>
                 {!state.userApiKey && (
                   <button 
                     onClick={() => setShowSettings(true)}
-                    className="text-[10px] font-bold text-white hover:underline uppercase tracking-widest"
+                    className="text-[10px] font-bold text-amber-500 hover:underline uppercase tracking-widest"
                   >
-                    Add Your Key
+                    Add Key to Start
                   </button>
                 )}
               </div>
 
               <button 
-                onClick={() => generatePhotoshoot()}
-                className="btn-primary w-full flex items-center justify-center gap-2 py-5"
+                onClick={() => state.userApiKey ? generatePhotoshoot() : setShowSettings(true)}
+                className={`w-full flex items-center justify-center gap-2 py-5 rounded-2xl font-bold uppercase tracking-widest transition-all ${
+                  state.userApiKey 
+                    ? 'bg-white text-black hover:bg-zinc-200' 
+                    : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                }`}
               >
-                {state.lowPowerMode ? 'Generate 1 Variation' : 'Generate 4 Variations'}
-                <ChevronRight className="w-4 h-4" />
+                {!state.userApiKey && <Zap className="w-4 h-4" />}
+                {state.userApiKey 
+                  ? (state.lowPowerMode ? 'Generate 1 Variation' : 'Generate 4 Variations')
+                  : 'Add API Key to Generate'}
+                {state.userApiKey && <ChevronRight className="w-4 h-4" />}
               </button>
             </div>
           </motion.div>
