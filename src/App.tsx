@@ -47,7 +47,7 @@ const STYLE_PREVIEWS: Record<Style, string> = {
   'Cinematic': 'https://picsum.photos/seed/cinematic/100/100',
 };
 
-class ErrorBoundary extends React.Component<any, any> {
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: any }> {
   state = { hasError: false, error: null };
 
   static getDerivedStateFromError(error: any) {
@@ -56,6 +56,7 @@ class ErrorBoundary extends React.Component<any, any> {
 
   render() {
     if (this.state.hasError) {
+      const errorMsg = (this.state.error as any)?.message || String(this.state.error);
       return (
         <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-8 text-center">
           <div className="glass-panel p-12 max-w-md space-y-6">
@@ -68,7 +69,7 @@ class ErrorBoundary extends React.Component<any, any> {
             </p>
             <div className="bg-black/40 p-4 rounded-xl text-left overflow-x-auto">
               <code className="text-[10px] text-red-400 font-mono">
-                {this.state.error?.message}
+                {errorMsg}
               </code>
             </div>
             <button 
@@ -81,7 +82,7 @@ class ErrorBoundary extends React.Component<any, any> {
         </div>
       );
     }
-    return (this as any).props.children;
+    return this.props.children;
   }
 }
 
@@ -237,7 +238,7 @@ function SnapStudioApp() {
   };
 
   const generateAnalysis = async (resultId: string, image: string, retries = 3): Promise<void> => {
-    setState(prev => ({
+    setState((prev: AppState) => ({
       ...prev,
       results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: true } : res)
     }));
@@ -263,7 +264,7 @@ function SnapStudioApp() {
         The heatmapData key should be an array of objects with keys: x, y, intensity.`;
 
       const analysisResponse = await aiInstance.models.generateContent({
-        model: retries === 0 ? 'gemini-3-flash-preview' : 'gemini-3.1-flash-lite-preview', // Fallback to standard flash on final retry
+        model: 'gemini-3-flash-preview',
         contents: [
           { text: analysisPrompt },
           { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
@@ -397,8 +398,6 @@ function SnapStudioApp() {
       ];
 
       // Sequential Image Generation with Retry and Backoff to avoid 429
-      const imageUrls: string[] = [];
-      
       const generateSingleImage = async (v: any, index: number, retries = 3): Promise<string> => {
         try {
           const aiInstance = getAI();
@@ -433,7 +432,7 @@ function SnapStudioApp() {
                               error?.message?.includes('quota');
           
           if (isQuotaError && retries > 0) {
-            const waitTime = (4 - retries) * 3000; // Exponential-ish backoff
+            const waitTime = (4 - retries) * 5000; // Increased backoff to 5s
             console.warn(`Quota hit for image ${index + 1}, retrying in ${waitTime}ms...`);
             await new Promise(r => setTimeout(r, waitTime));
             return generateSingleImage(v, index, retries - 1);
@@ -442,19 +441,13 @@ function SnapStudioApp() {
         }
       };
 
+      // Initialize results state early
+      setState((prev: AppState) => ({ ...prev, results: [], currentResultIndex: 0 }));
+
       for (let i = 0; i < variationPrompts.length; i++) {
         const url = await generateSingleImage(variationPrompts[i], i);
-        imageUrls.push(url);
-        // Small delay between successful calls to stay under RPM limits
-        if (i < variationPrompts.length - 1) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-
-      if (imageUrls.length === 0) throw new Error("No images generated");
-
-      const newResults: ResultItem[] = imageUrls.map((url, i) => {
-        return {
+        
+        const newResult: ResultItem = {
           id: Math.random().toString(36).substr(2, 9),
           image: url,
           caption: {
@@ -471,19 +464,26 @@ function SnapStudioApp() {
           aspectRatio: state.aspectRatio!,
           timestamp: Date.now()
         };
-      });
 
-      setState(prev => ({
-        ...prev,
-        step: 'result',
-        results: newResults,
-        currentResultIndex: 0,
-        history: [...newResults, ...prev.history].slice(0, 4), // Limited to 4 items
-      }));
+        setState((prev: AppState) => ({
+          ...prev,
+          step: 'result',
+          results: [...prev.results, newResult],
+          currentResultIndex: prev.results.length,
+          history: [newResult, ...prev.history].slice(0, 4),
+        }));
+
+        if (i === 0) {
+          generateAnalysis(newResult.id, newResult.image);
+        }
+
+        // Delay between successful calls to stay under RPM limits (Free tier is strict)
+        if (i < variationPrompts.length - 1) {
+          await new Promise(r => setTimeout(r, 4000));
+        }
+      }
+
       setRefineInput('');
-
-      // Auto-trigger analysis for the first variation
-      generateAnalysis(newResults[0].id, newResults[0].image);
 
     } catch (error: any) {
       console.error("Generation failed:", error);
@@ -496,10 +496,10 @@ function SnapStudioApp() {
       const errorMessage = isKeyError
         ? "API Key Required. Please click the key icon in the top right to add your Gemini API key."
         : isQuotaError 
-          ? "AI Quota Exceeded. Please wait a minute before trying again. This happens when the AI is processing too many requests."
+          ? "AI Quota Reached. The free tier has strict limits (often 2-5 images per minute). Please wait 60 seconds or add your own API key in settings to increase limits."
           : "Something went wrong during generation. Please try again.";
 
-      setState(prev => ({ ...prev, step: 'input', error: errorMessage }));
+      setState(prev => ({ ...prev, step: prev.results.length > 0 ? 'result' : 'input', error: errorMessage }));
       if (isKeyError) setShowSettings(true);
     }
   };
@@ -603,7 +603,7 @@ function SnapStudioApp() {
 
                   <div className="p-4 bg-amber-500/5 rounded-2xl border border-amber-500/10">
                     <p className="text-[10px] text-amber-500/80 leading-relaxed">
-                      By using your own API key, you won't be limited by the developer's credits. This app will remain 100% free for you to use.
+                      Note: The Gemini free tier has strict limits (approx. 2-5 images per minute). If you see "Quota Reached", simply wait 60 seconds. Using your own key helps avoid shared limits.
                     </p>
                   </div>
 
@@ -1589,7 +1589,7 @@ function SnapStudioApp() {
                           </p>
                         </motion.div>
                       ))}
-                      {(!state.results[state.currentResultIndex]?.focusGroup || state.results[state.currentResultIndex]?.focusGroup.length === 0) && (
+                      {state.results[state.currentResultIndex] && (!state.results[state.currentResultIndex].focusGroup || state.results[state.currentResultIndex].focusGroup?.length === 0) && (
                         <div className="text-center py-8 bg-black/20 rounded-2xl border border-dashed border-white/5">
                           <p className="text-[10px] text-white/30 uppercase font-bold tracking-widest">
                             {state.results[state.currentResultIndex]?.isAnalyzing ? "AI is processing audience response..." : state.results[state.currentResultIndex]?.score === 0 ? "Audit required for this variation" : "Simulating audience response..."}
