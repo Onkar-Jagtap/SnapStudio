@@ -28,6 +28,7 @@ import {
   Layout,
   Smartphone,
   Facebook,
+  Linkedin,
   ShoppingBag,
   Target,
   BarChart3,
@@ -123,14 +124,61 @@ function SnapStudioApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [showComparison, setShowComparison] = useState(false);
   const [isZoomed, setIsZoomed] = useState(false);
+  const [isValidatingKey, setIsValidatingKey] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<'idle' | 'success' | 'error'>('idle');
+
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const validateApiKey = async (key: string) => {
+    if (!key) return;
+    setIsValidatingKey(true);
+    setKeyStatus('idle');
+    try {
+      const genAI = new GoogleGenAI({ 
+        apiKey: key,
+        // @ts-ignore
+        apiVersion: 'v1beta'
+      });
+      await genAI.models.generateContent({
+        model: "models/gemini-1.5-flash",
+        contents: [{ role: 'user', parts: [{ text: "hi" }] }]
+      });
+      setKeyStatus('success');
+      setState(prev => ({ ...prev, userApiKey: key }));
+      localStorage.setItem('snapstudio_user_key', key);
+    } catch (e) {
+      console.error("Key validation failed", e);
+      setKeyStatus('error');
+    } finally {
+      setIsValidatingKey(false);
+    }
+  };
+
+  const shareToLinkedIn = (res: ResultItem) => {
+    const text = `Check out this product photoshoot I just generated with SnapStudio AI! 🚀
+
+Style: ${res.style}
+Impact Score: ${res.score}/100
+Analysis: ${res.analysis}
+
+Try it yourself at ${window.location.origin}
+
+#AI #ProductPhotography #Marketing #SnapStudio`;
+    
+    const url = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.origin)}&text=${encodeURIComponent(text)}`;
+    window.open(url, '_blank');
+  };
 
   // Helper to get the active AI instance
   const getAI = (customKey?: string) => {
     const key = customKey || state.userApiKey || '';
     if (!key) throw new Error("API Key Required. Please click the ⚡ icon in the top right to add your own Gemini API key.");
-    return new GoogleGenAI({ apiKey: key });
+    return new GoogleGenAI({ 
+      apiKey: key,
+      // @ts-ignore
+      apiVersion: 'v1beta'
+    });
   };
 
   // Load history and settings from localStorage
@@ -237,7 +285,7 @@ function SnapStudioApp() {
     if (file) handleFile(file);
   };
 
-  const generateAnalysis = async (resultId: string, image: string, retries = 3): Promise<void> => {
+  const generateAnalysisWithModel = async (resultId: string, image: string, model: string, retries = 3): Promise<void> => {
     setState((prev: AppState) => ({
       ...prev,
       results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: true } : res)
@@ -264,7 +312,7 @@ function SnapStudioApp() {
         The heatmapData key should be an array of objects with keys: x, y, intensity.`;
 
       const analysisResponse = await aiInstance.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: `models/${model}`,
         contents: [
           { text: analysisPrompt },
           { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
@@ -325,20 +373,32 @@ function SnapStudioApp() {
       }));
     } catch (error: any) {
       const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
-                          error?.message?.includes('429') || 
-                          error?.message?.includes('quota');
+                          error?.status === 429 ||
+                          error?.message?.toString().toLowerCase().includes('429') || 
+                          error?.message?.toString().toLowerCase().includes('quota') ||
+                          error?.message?.toString().toLowerCase().includes('exhausted');
 
       if (isQuotaError && retries > 0) {
-        const waitTime = (4 - retries) * 4000;
+        const waitTime = (4 - retries) * 10000;
         await new Promise(resolve => setTimeout(resolve, waitTime));
-        return generateAnalysis(resultId, image, retries - 1);
+        return generateAnalysisWithModel(resultId, image, model, retries - 1);
       }
+      
+      // Fallback model if the 1.5 flash limit is hit
+      if (model === 'gemini-1.5-flash-latest' && isQuotaError) {
+        return generateAnalysisWithModel(resultId, image, 'gemini-1.5-pro-latest', 1);
+      }
+
       console.error("Analysis failed:", error);
       setState(prev => ({
         ...prev,
         results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: false } : res)
       }));
     }
+  };
+
+  const generateAnalysis = (resultId: string, image: string) => {
+    return generateAnalysisWithModel(resultId, image, 'gemini-2.0-flash');
   };
 
   const generatePhotoshoot = async (isRefining = false) => {
@@ -411,7 +471,8 @@ function SnapStudioApp() {
           }
 
           const response = await aiInstance.models.generateContent({
-            model: 'gemini-2.5-flash-image',
+            // Using gemini-2.0-flash for high quality and speed
+            model: 'models/gemini-2.0-flash',
             contents: { parts },
             config: {
               imageConfig: {
@@ -428,11 +489,14 @@ function SnapStudioApp() {
           throw new Error("No image in response");
         } catch (error: any) {
           const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
-                              error?.message?.includes('429') || 
-                              error?.message?.includes('quota');
+                              error?.status === 429 ||
+                              error?.message?.toString().toLowerCase().includes('429') || 
+                              error?.message?.toString().toLowerCase().includes('quota') ||
+                              error?.message?.toString().toLowerCase().includes('exhausted');
           
           if (isQuotaError && retries > 0) {
-            const waitTime = (4 - retries) * 5000; // Increased backoff to 5s
+            // Aggressive backoff for free-tier users hitting RPM limits
+            const waitTime = (4 - retries) * 10000; // 10s, 20s, 30s
             console.warn(`Quota hit for image ${index + 1}, retrying in ${waitTime}ms...`);
             await new Promise(r => setTimeout(r, waitTime));
             return generateSingleImage(v, index, retries - 1);
@@ -441,45 +505,79 @@ function SnapStudioApp() {
         }
       };
 
-      // Initialize results state early
-      setState((prev: AppState) => ({ ...prev, results: [], currentResultIndex: 0 }));
+      // Initialize results state with placeholders early
+      const placeholders: ResultItem[] = variationPrompts.map((v, i) => ({
+        id: `placeholder-${i}`,
+        image: '', // Empty means loading
+        caption: { instagram: "", adCopy: "" },
+        score: 0,
+        analysis: "",
+        focusGroup: [],
+        heatmapData: [],
+        chapter: v.chapter as any,
+        style: state.style!,
+        lighting: state.lighting!,
+        aspectRatio: state.aspectRatio!,
+        timestamp: Date.now(),
+        isLoading: true
+      }));
 
+      setState((prev: AppState) => ({ 
+        ...prev, 
+        results: placeholders, 
+        currentResultIndex: 0,
+        step: 'result'
+      }));
+
+      let firstSuccessId: string | null = null;
       for (let i = 0; i < variationPrompts.length; i++) {
-        const url = await generateSingleImage(variationPrompts[i], i);
-        
-        const newResult: ResultItem = {
-          id: Math.random().toString(36).substr(2, 9),
-          image: url,
-          caption: {
-            instagram: "",
-            adCopy: ""
-          },
-          score: 0,
-          analysis: "",
-          focusGroup: [],
-          heatmapData: [],
-          chapter: variationPrompts[i].chapter as any,
-          style: state.style!,
-          lighting: state.lighting!,
-          aspectRatio: state.aspectRatio!,
-          timestamp: Date.now()
-        };
+        try {
+          const url = await generateSingleImage(variationPrompts[i], i);
+          
+          const finalId = Math.random().toString(36).substr(2, 9);
+          const newResult: ResultItem = {
+            ...placeholders[i],
+            id: finalId,
+            image: url,
+            isLoading: false
+          };
 
-        setState((prev: AppState) => ({
-          ...prev,
-          step: 'result',
-          results: [...prev.results, newResult],
-          currentResultIndex: prev.results.length,
-          history: [newResult, ...prev.history].slice(0, 4),
-        }));
+          if (!firstSuccessId) firstSuccessId = finalId;
 
-        if (i === 0) {
-          generateAnalysis(newResult.id, newResult.image);
-        }
+          setState((prev: AppState) => {
+            const nextResults = [...prev.results];
+            nextResults[i] = newResult;
+            return {
+              ...prev,
+              results: nextResults,
+              history: [newResult, ...prev.history].slice(0, 4),
+            };
+          });
 
-        // Delay between successful calls to stay under RPM limits (Free tier is strict)
-        if (i < variationPrompts.length - 1) {
-          await new Promise(r => setTimeout(r, 4000));
+          // Trigger analysis for the first successful item immediately after it loads
+          if (i === 0 || (!firstSuccessId && i > 0)) {
+            generateAnalysis(finalId, url);
+          }
+
+          // Delay between successful calls to stay under RPM limits (Free tier is strict)
+          if (i < variationPrompts.length - 1) {
+            await new Promise(r => setTimeout(r, 15000));
+          }
+        } catch (imageError: any) {
+          console.error(`Variation ${i + 1} failed:`, imageError);
+          
+          // Mark placeholder as failed
+          setState((prev: AppState) => {
+            const nextResults = [...prev.results];
+            nextResults[i] = {
+              ...nextResults[i],
+              isLoading: false,
+              error: "Generation Failed"
+            };
+            return { ...prev, results: nextResults };
+          });
+
+          if (i === 0 && variationPrompts.length === 1) throw imageError;
         }
       }
 
@@ -488,16 +586,20 @@ function SnapStudioApp() {
     } catch (error: any) {
       console.error("Generation failed:", error);
       const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
+                          error?.status === 429 ||
                           error?.message?.includes('429') || 
                           error?.message?.includes('quota');
       
       const isKeyError = error?.message?.includes('API Key Required');
       
+      let errorDetail = error?.message || String(error);
+      if (error?.status) errorDetail = `[${error.status}] ${errorDetail}`;
+
       const errorMessage = isKeyError
-        ? "API Key Required. Please click the key icon in the top right to add your Gemini API key."
+        ? "API Key Required. Please click the ⚡ icon in the top right to add your Gemini API key."
         : isQuotaError 
-          ? "AI Quota Reached. The free tier has strict limits (often 2-5 images per minute). Please wait 60 seconds or add your own API key in settings to increase limits."
-          : "Something went wrong during generation. Please try again.";
+          ? "AI Quota Reached. The Gemini Free Tier allows 2 images per minute. If you are doing a 4-image Campaign, please wait 60s and try again, or use 'Eco Mode' for single shots."
+          : `Generation failed: ${errorDetail}`;
 
       setState(prev => ({ ...prev, step: prev.results.length > 0 ? 'result' : 'input', error: errorMessage }));
       if (isKeyError) setShowSettings(true);
@@ -600,17 +702,24 @@ function SnapStudioApp() {
                         onChange={(e) => {
                           const val = e.target.value.trim();
                           setState(prev => ({ ...prev, userApiKey: val || null }));
-                          if (val) localStorage.setItem('snapstudio_user_key', val);
-                          else localStorage.removeItem('snapstudio_user_key');
+                          setKeyStatus('idle');
                         }}
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-white/30 transition-all font-mono"
                       />
-                      {state.userApiKey && (
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                          <CheckCircle2 className="w-4 h-4 text-green-500" />
-                        </div>
-                      )}
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                        {isValidatingKey && <RefreshCw className="w-4 h-4 text-zinc-500 animate-spin" />}
+                        {keyStatus === 'success' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
+                        {keyStatus === 'error' && <Zap className="w-4 h-4 text-red-500" />}
+                      </div>
                     </div>
+                    {state.userApiKey && keyStatus === 'idle' && (
+                      <button 
+                        onClick={() => validateApiKey(state.userApiKey!)}
+                        className="w-full py-2 bg-white/5 hover:bg-white/10 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all"
+                      >
+                        Verify Key
+                      </button>
+                    )}
                     <p className="text-[10px] text-zinc-500 leading-relaxed">
                       <b>Privacy Note:</b> Your key is stored only in your browser's local storage. It is never sent to our servers.
                     </p>
@@ -1274,17 +1383,39 @@ function SnapStudioApp() {
                       </div>
                     ) : (
                       <div className="relative w-full h-full">
-                        <img 
-                          src={state.results[state.currentResultIndex]?.image} 
-                          alt="Photoshoot Result" 
-                          className={`w-full h-full object-cover ${isZoomed ? 'object-contain' : ''}`}
-                          referrerPolicy="no-referrer"
-                        />
-                        {state.mockupMode !== 'none' && (
-                          <MockupOverlay mode={state.mockupMode} image={state.results[state.currentResultIndex]?.image} />
-                        )}
-                        {state.showHeatmap && state.results[state.currentResultIndex]?.heatmapData && (
-                          <HeatmapOverlay data={state.results[state.currentResultIndex].heatmapData!} />
+                        {state.results[state.currentResultIndex]?.isLoading ? (
+                          <div className="w-full h-full bg-zinc-900 flex flex-col items-center justify-center space-y-4 animate-pulse">
+                            <div className="w-12 h-12 bg-white/10 rounded-full flex items-center justify-center">
+                              <RefreshCw className="w-6 h-6 text-zinc-500 animate-spin" />
+                            </div>
+                            <div className="text-center">
+                              <p className="text-xs font-bold uppercase tracking-widest text-zinc-500">Generating Variation {state.currentResultIndex + 1}...</p>
+                              <p className="text-[10px] text-zinc-600 mt-1">Sequential generation to respect free tier limits</p>
+                            </div>
+                          </div>
+                        ) : state.results[state.currentResultIndex]?.error ? (
+                          <div className="w-full h-full bg-red-500/10 flex flex-col items-center justify-center p-8 space-y-4">
+                            <Zap className="w-12 h-12 text-red-500" />
+                            <div className="text-center">
+                              <p className="text-sm font-bold text-red-500 uppercase tracking-widest">Generation Failed</p>
+                              <p className="text-xs text-red-400/60 mt-2">{state.results[state.currentResultIndex]?.error}</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <img 
+                              src={state.results[state.currentResultIndex]?.image} 
+                              alt="Photoshoot Result" 
+                              className={`w-full h-full object-cover ${isZoomed ? 'object-contain' : ''}`}
+                              referrerPolicy="no-referrer"
+                            />
+                            {state.mockupMode !== 'none' && (
+                              <MockupOverlay mode={state.mockupMode} image={state.results[state.currentResultIndex]?.image} />
+                            )}
+                            {state.showHeatmap && state.results[state.currentResultIndex]?.heatmapData && (
+                              <HeatmapOverlay data={state.results[state.currentResultIndex].heatmapData!} />
+                            )}
+                          </>
                         )}
                       </div>
                     )}
@@ -1368,7 +1499,17 @@ function SnapStudioApp() {
                       onClick={() => setState(prev => ({ ...prev, currentResultIndex: idx }))}
                       className={`relative aspect-square rounded-2xl overflow-hidden border-2 transition-all duration-300 ${state.currentResultIndex === idx ? 'border-white scale-105 shadow-xl' : 'border-transparent opacity-50 hover:opacity-100 hover:scale-102'}`}
                     >
-                      <img src={res.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      {res.isLoading ? (
+                        <div className="w-full h-full bg-zinc-900 flex items-center justify-center">
+                          <RefreshCw className="w-4 h-4 text-zinc-600 animate-spin" />
+                        </div>
+                      ) : res.error ? (
+                        <div className="w-full h-full bg-red-500/10 flex items-center justify-center">
+                          <Zap className="w-4 h-4 text-red-500/50" />
+                        </div>
+                      ) : (
+                        <img src={res.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      )}
                       <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
                       <div className="absolute bottom-2 left-2 flex flex-col items-start">
                         <span className="text-[8px] font-bold text-white/60 uppercase tracking-tighter">#{idx + 1}</span>
@@ -1411,19 +1552,29 @@ function SnapStudioApp() {
               <div className="flex gap-4">
                 <button 
                   onClick={() => downloadImage(state.results[state.currentResultIndex].image)}
-                  className="btn-primary flex-1 flex items-center justify-center gap-2 py-4"
+                  disabled={state.results[state.currentResultIndex]?.isLoading || !!state.results[state.currentResultIndex]?.error}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Download className="w-5 h-5" />
                   Download
                 </button>
                 <button 
                   onClick={downloadAll}
-                  className="btn-secondary flex-1 flex items-center justify-center gap-2 py-4"
+                  disabled={state.results.some(r => r.isLoading)}
+                  className="btn-secondary flex-1 flex items-center justify-center gap-2 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <DownloadCloud className="w-5 h-5" />
                   Save All
                 </button>
               </div>
+
+              <button 
+                onClick={() => shareToLinkedIn(state.results[state.currentResultIndex])}
+                className="w-full h-14 bg-[#0077b5]/10 hover:bg-[#0077b5]/20 border border-[#0077b5]/30 text-[#0077b5] rounded-2xl flex items-center justify-center gap-2 font-bold uppercase tracking-widest text-[10px] transition-all"
+              >
+                <Linkedin className="w-4 h-4" />
+                Post on LinkedIn
+              </button>
 
               <button 
                 onClick={() => setState(prev => ({ ...prev, step: 'input', results: [], currentResultIndex: 0 }))}
@@ -1549,8 +1700,19 @@ function SnapStudioApp() {
 
                   <div className="bg-black/20 p-4 rounded-2xl border border-white/10">
                     <p className="text-sm text-white/80 leading-relaxed">
-                      <Sparkles className="w-4 h-4 inline-block mr-2 text-white" />
-                      {state.results[state.currentResultIndex]?.analysis || "Analyzing conversion potential..."}
+                      {state.results[state.currentResultIndex]?.isLoading ? (
+                        <span className="flex items-center gap-2 opacity-50 italic">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          Waiting for variation to render...
+                        </span>
+                      ) : state.results[state.currentResultIndex]?.error ? (
+                        <span className="text-red-400">Audit skipped due to generation failure.</span>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4 inline-block mr-2 text-white" />
+                          {state.results[state.currentResultIndex]?.analysis || "Analyzing conversion potential..."}
+                        </>
+                      )}
                     </p>
                   </div>
 

@@ -38,6 +38,8 @@ export interface ResultItem {
   focusGroup?: FocusGroupPersona[];
   heatmapData?: HeatmapPoint[];
   isAnalyzing?: boolean;
+  isLoading?: boolean;
+  error?: string;
 }
 
 export interface AppState {
