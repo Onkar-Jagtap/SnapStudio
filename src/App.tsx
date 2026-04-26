@@ -140,16 +140,23 @@ function SnapStudioApp() {
         // @ts-ignore
         apiVersion: 'v1beta'
       });
+      // Validate using a prompt that works across most models
       await genAI.models.generateContent({
-        model: "models/gemini-1.5-flash",
+        model: "gemini-flash-latest",
         contents: [{ role: 'user', parts: [{ text: "hi" }] }]
       });
       setKeyStatus('success');
-      setState(prev => ({ ...prev, userApiKey: key }));
+      setState(prev => ({ ...prev, userApiKey: key, error: null }));
       localStorage.setItem('snapstudio_user_key', key);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Key validation failed", e);
       setKeyStatus('error');
+      
+      let msg = "Invalid API Key. Please check the key and try again.";
+      if (e?.message?.includes("API_KEY_INVALID")) msg = "The API key provided is invalid.";
+      if (e?.message?.includes("status: 403")) msg = "API Key not authorized. Ensure 'Generative Language API' is enabled in Cloud Console.";
+      
+      setState(prev => ({ ...prev, error: msg }));
     } finally {
       setIsValidatingKey(false);
     }
@@ -174,6 +181,9 @@ Try it yourself at ${window.location.origin}
   const getAI = (customKey?: string) => {
     const key = customKey || state.userApiKey || '';
     if (!key) throw new Error("API Key Required. Please click the ⚡ icon in the top right to add your own Gemini API key.");
+    
+    // In @google/genai, we use the standard constructor.
+    // Explicitly using v1beta for Gemini 2.0 support
     return new GoogleGenAI({ 
       apiKey: key,
       // @ts-ignore
@@ -312,7 +322,7 @@ Try it yourself at ${window.location.origin}
         The heatmapData key should be an array of objects with keys: x, y, intensity.`;
 
       const analysisResponse = await aiInstance.models.generateContent({
-        model: `models/${model}`,
+        model: model,
         contents: [
           { text: analysisPrompt },
           { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
@@ -335,8 +345,7 @@ Try it yourself at ${window.location.origin}
                     avatar: { type: Type.STRING },
                     feedback: { type: Type.STRING },
                     sentiment: { type: Type.STRING }
-                  },
-                  required: ["name", "avatar", "feedback", "sentiment"]
+                  }
                 }
               },
               heatmapData: {
@@ -347,17 +356,16 @@ Try it yourself at ${window.location.origin}
                     x: { type: Type.NUMBER },
                     y: { type: Type.NUMBER },
                     intensity: { type: Type.NUMBER }
-                  },
-                  required: ["x", "y", "intensity"]
+                  }
                 }
               }
-            },
-            required: ["instagram", "adCopy", "score", "analysis", "focusGroup", "heatmapData"]
+            }
           }
         }
       });
 
-      const analysis = JSON.parse(analysisResponse.text || '{}');
+      const resultText = (analysisResponse as any).candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const analysis = JSON.parse(resultText || '{}');
       
       setState(prev => ({
         ...prev,
@@ -384,21 +392,22 @@ Try it yourself at ${window.location.origin}
         return generateAnalysisWithModel(resultId, image, model, retries - 1);
       }
       
-      // Fallback model if the 1.5 flash limit is hit
-      if (model === 'gemini-1.5-flash-latest' && isQuotaError) {
-        return generateAnalysisWithModel(resultId, image, 'gemini-1.5-pro-latest', 1);
+      // Fallback model if the flash limit is hit
+      if (model.includes('flash') && isQuotaError) {
+        return generateAnalysisWithModel(resultId, image, 'gemini-3.1-pro-preview', 1);
       }
 
       console.error("Analysis failed:", error);
       setState(prev => ({
         ...prev,
+        error: "Marketing analysis failed. You can still download the image, but AI insights are unavailable.",
         results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: false } : res)
       }));
     }
   };
 
   const generateAnalysis = (resultId: string, image: string) => {
-    return generateAnalysisWithModel(resultId, image, 'gemini-2.0-flash');
+    return generateAnalysisWithModel(resultId, image, 'gemini-flash-latest');
   };
 
   const generatePhotoshoot = async (isRefining = false) => {
@@ -471,8 +480,8 @@ Try it yourself at ${window.location.origin}
           }
 
           const response = await aiInstance.models.generateContent({
-            // Using gemini-2.0-flash for high quality and speed
-            model: 'models/gemini-2.0-flash',
+            // Use the standard model name from the gemini-api skill for image generation
+            model: 'gemini-2.5-flash-image',
             contents: { parts },
             config: {
               imageConfig: {
@@ -481,12 +490,17 @@ Try it yourself at ${window.location.origin}
             }
           });
 
-          for (const part of response.candidates?.[0]?.content?.parts || []) {
-            if (part.inlineData) {
-              return `data:image/png;base64,${part.inlineData.data}`;
+          const candidates = (response as any).candidates;
+          if (candidates && candidates.length > 0) {
+            for (const part of candidates[0].content?.parts || []) {
+              if (part.inlineData && part.inlineData.mimeType.startsWith('image/')) {
+                return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+              }
             }
           }
-          throw new Error("No image in response");
+          
+          console.error("Detailed Response Structure:", JSON.stringify(response, null, 2));
+          throw new Error("No image was returned. This may be due to safety filters (e.g. people in images) or a model configuration issue.");
         } catch (error: any) {
           const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
                               error?.status === 429 ||
@@ -587,22 +601,40 @@ Try it yourself at ${window.location.origin}
       console.error("Generation failed:", error);
       const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
                           error?.status === 429 ||
-                          error?.message?.includes('429') || 
-                          error?.message?.includes('quota');
+                          error?.message?.toString().toLowerCase().includes('429') || 
+                          error?.message?.toString().toLowerCase().includes('quota') ||
+                          error?.message?.toString().toLowerCase().includes('exhausted');
       
-      const isKeyError = error?.message?.includes('API Key Required');
+      const isKeyError = error?.message?.toString().toLowerCase().includes('api key') || 
+                        error?.message?.toString().toLowerCase().includes('invalid');
       
-      let errorDetail = error?.message || String(error);
-      if (error?.status) errorDetail = `[${error.status}] ${errorDetail}`;
+      const isNotFoundError = error?.status === 404 || 
+                             error?.message?.toString().toLowerCase().includes('not found') ||
+                             error?.message?.toString().toLowerCase().includes('404');
 
-      const errorMessage = isKeyError
-        ? "API Key Required. Please click the ⚡ icon in the top right to add your Gemini API key."
-        : isQuotaError 
-          ? "AI Quota Reached. The Gemini Free Tier allows 2 images per minute. If you are doing a 4-image Campaign, please wait 60s and try again, or use 'Eco Mode' for single shots."
-          : `Generation failed: ${errorDetail}`;
+      const isSafetyError = error?.message?.toString().toLowerCase().includes('safety') ||
+                           error?.message?.toString().toLowerCase().includes('blocked');
+      
+      let errorMessage = "Generation failed. Please try again.";
 
-      setState(prev => ({ ...prev, step: prev.results.length > 0 ? 'result' : 'input', error: errorMessage }));
-      if (isKeyError) setShowSettings(true);
+      if (isKeyError) {
+        errorMessage = "Invalid or Missing API Key. Click the ⚡ in the top right to fix.";
+        setShowSettings(true);
+      } else if (isQuotaError) {
+        errorMessage = "AI Quota Reached. The Gemini Free Tier limit is strict. Please wait 60s and try again.";
+      } else if (isNotFoundError) {
+        errorMessage = "Model not found. Your key might not have Gemini 2.0 access yet. Ensure 'v1beta' is available.";
+      } else if (isSafetyError) {
+        errorMessage = "The AI blocked this request for safety. Avoid people or sensitive content in images.";
+      } else if (error?.message) {
+        errorMessage = `Error: ${error.message}`;
+      }
+
+      setState(prev => ({ 
+        ...prev, 
+        step: prev.results.length > 0 ? 'result' : 'input', 
+        error: errorMessage 
+      }));
     }
   };
 
@@ -1892,6 +1924,36 @@ Try it yourself at ${window.location.origin}
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-white/5 blur-[120px] rounded-full" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-white/5 blur-[120px] rounded-full" />
       </div>
+
+      {/* Global Error Toast */}
+      <AnimatePresence>
+        {state.error && (
+          <motion.div
+            initial={{ y: 100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 100, opacity: 0 }}
+            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-sm px-4"
+          >
+            <div className="bg-zinc-900 border border-red-500/50 shadow-2xl shadow-red-500/10 rounded-2xl p-4 flex items-start gap-4">
+              <div className="w-10 h-10 bg-red-500/10 text-red-500 rounded-xl flex items-center justify-center flex-shrink-0">
+                <Zap className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="text-sm font-bold text-white">Action Required</h4>
+                <p className="text-xs text-zinc-400 leading-relaxed mt-1 break-words">
+                  {state.error}
+                </p>
+              </div>
+              <button 
+                onClick={() => setState(prev => ({ ...prev, error: null }))}
+                className="p-1 hover:bg-white/5 rounded-lg text-zinc-500 hover:text-white transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
