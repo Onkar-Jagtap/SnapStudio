@@ -135,10 +135,14 @@ function SnapStudioApp() {
     setIsValidatingKey(true);
     setKeyStatus('idle');
     try {
-      const genAI = new GoogleGenAI({ apiKey: key });
-      // Validate using the recommended flash model
+      const genAI = new GoogleGenAI({ 
+        apiKey: key,
+        // @ts-ignore
+        apiVersion: 'v1beta' 
+      });
+      // Validate using a widely available model
       await genAI.models.generateContent({
-        model: "gemini-flash-latest",
+        model: "gemini-1.5-flash-latest",
         contents: [{ role: 'user', parts: [{ text: "hi" }] }]
       });
       setKeyStatus('success');
@@ -187,8 +191,9 @@ Try it yourself at ${window.location.origin}
     const key = customKey || state.userApiKey || '';
     if (!key) throw new Error("API Key Required. Please click the ⚡ icon in the top right to add your own Gemini API key.");
     
-    // Using standard initialization as per skill
-    return new GoogleGenAI({ apiKey: key });
+    // Explicitly enabling v1beta to ensure support for Gemini 2.0 and experimental models
+    // @ts-ignore
+    return new GoogleGenAI({ apiKey: key, apiVersion: 'v1beta' });
   };
 
   // Load history and settings from localStorage
@@ -318,8 +323,13 @@ Try it yourself at ${window.location.origin}
       const analysisResponse = await aiInstance.models.generateContent({
         model: model,
         contents: [
-          { text: analysisPrompt },
-          { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
+          {
+            role: 'user',
+            parts: [
+              { text: analysisPrompt },
+              { inlineData: { data: image.split(',')[1], mimeType: 'image/png' } }
+            ]
+          }
         ],
         config: {
           responseMimeType: "application/json",
@@ -458,12 +468,11 @@ Try it yourself at ${window.location.origin}
 
       // Sequential Image Generation with Retry and Model Fallbacks
       const generateSingleImage = async (v: any, index: number, retries = 3): Promise<string> => {
-        // Preference order for image generation models according to skill
+        // Preference order for image generation models
         const modelsToTry = [
-          'gemini-2.5-flash-image',
           'gemini-2.0-flash-exp',
           'gemini-2.0-flash',
-          'gemini-3.1-flash-image-preview'
+          'gemini-2.5-flash-image'
         ];
 
         let lastError: any = null;
@@ -482,8 +491,9 @@ Try it yourself at ${window.location.origin}
 
             const response = await aiInstance.models.generateContent({
               model: modelName,
-              contents: { parts },
+              contents: [{ role: 'user', parts }],
               config: {
+                // @ts-ignore
                 imageConfig: {
                   aspectRatio: state.aspectRatio as any
                 }
@@ -498,26 +508,29 @@ Try it yourself at ${window.location.origin}
               }
             }
             
-            throw new Error(`Model ${modelName} returned no image.`);
+            throw new Error(`Model ${modelName} candidate returned no image data.`);
           } catch (error: any) {
             lastError = error;
             const errStr = error?.message?.toString().toLowerCase() || "";
             const isQuota = error?.status === 429 || errStr.includes('quota') || errStr.includes('429');
             const isNotFound = error?.status === 404 || errStr.includes('not found') || errStr.includes('404');
             
-            console.warn(`Model ${modelName} failed:`, error);
+            console.warn(`Generation attempt failed for ${modelName}:`, { status: error?.status, message: error?.message });
 
             if (isQuota && retries > 0) {
-              await new Promise(r => setTimeout(r, 10000));
+              const waitTime = 15000;
+              console.log(`Quota reached for ${modelName}, waiting ${waitTime}ms...`);
+              await new Promise(r => setTimeout(r, waitTime));
               return generateSingleImage(v, index, retries - 1);
             }
             
-            // Continue to next model if not found or other non-quota error
-            continue;
+            // If it's not a quota issue or we're out of retries for this specific model, try the next one
           }
         }
 
-        throw lastError || new Error("All image generation models failed.");
+        const finalErrorMessage = lastError?.message || "Unknown error";
+        const finalErrorCode = lastError?.status || "Unknown status";
+        throw new Error(`All models failed. Final Error [${finalErrorCode}]: ${finalErrorMessage}`);
       };
 
       // Initialize results state with placeholders early
