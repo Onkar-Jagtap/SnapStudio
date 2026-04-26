@@ -135,12 +135,8 @@ function SnapStudioApp() {
     setIsValidatingKey(true);
     setKeyStatus('idle');
     try {
-      const genAI = new GoogleGenAI({ 
-        apiKey: key,
-        // @ts-ignore
-        apiVersion: 'v1beta'
-      });
-      // Validate using a prompt that works across most models
+      const genAI = new GoogleGenAI({ apiKey: key });
+      // Validate using the recommended flash model
       await genAI.models.generateContent({
         model: "gemini-flash-latest",
         contents: [{ role: 'user', parts: [{ text: "hi" }] }]
@@ -153,8 +149,17 @@ function SnapStudioApp() {
       setKeyStatus('error');
       
       let msg = "Invalid API Key. Please check the key and try again.";
-      if (e?.message?.includes("API_KEY_INVALID")) msg = "The API key provided is invalid.";
-      if (e?.message?.includes("status: 403")) msg = "API Key not authorized. Ensure 'Generative Language API' is enabled in Cloud Console.";
+      const errLower = e?.message?.toString().toLowerCase() || "";
+      
+      if (errLower.includes("api_key_invalid")) {
+        msg = "The API key provided is invalid.";
+      } else if (errLower.includes("403") || errLower.includes("permission_denied")) {
+        msg = "API Key error: Not authorized. Check if 'Generative Language API' is enabled in Google AI Studio.";
+      } else if (errLower.includes("quota") || errLower.includes("429")) {
+        msg = "API Key hit quota during validation. Please wait a moment.";
+      } else if (e?.message) {
+        msg = `Validation failed: ${e.message}`;
+      }
       
       setState(prev => ({ ...prev, error: msg }));
     } finally {
@@ -182,13 +187,8 @@ Try it yourself at ${window.location.origin}
     const key = customKey || state.userApiKey || '';
     if (!key) throw new Error("API Key Required. Please click the ⚡ icon in the top right to add your own Gemini API key.");
     
-    // In @google/genai, we use the standard constructor.
-    // Explicitly using v1beta for Gemini 2.0 support
-    return new GoogleGenAI({ 
-      apiKey: key,
-      // @ts-ignore
-      apiVersion: 'v1beta'
-    });
+    // Using standard initialization as per skill
+    return new GoogleGenAI({ apiKey: key });
   };
 
   // Load history and settings from localStorage
@@ -308,18 +308,12 @@ Try it yourself at ${window.location.origin}
         Provide:
         1. Instagram caption with hashtags.
         2. Punchy ad copy line.
-        3. Conversion Score (0-100) based on visual appeal and platform best practices.
-        4. A 1-sentence marketing analysis of why it will convert.
-        5. A "Synthetic Focus Group" feedback from 3 distinct personas:
-           - "The Skeptical Gen Z" (Values authenticity, raw vibes, sustainability)
-           - "The Luxury Collector" (Values status, premium details, exclusivity)
-           - "The Budget-Conscious Parent" (Values durability, practicality, value)
-        6. "AI Eye-Tracking Heatmap Data":
-           - Provide 5-8 "Hot Zones" (x, y coordinates from 0-100 and intensity from 0.1-1.0) where a human eye would land first.
+        3. Conversion Score (0-100).
+        4. A 1-sentence marketing analysis.
+        5. "Synthetic Focus Group" feedback from 3 distinct personas.
+        6. "AI Eye-Tracking Heatmap Data" (5-8 x,y points).
            
-        Return as a JSON object with keys: instagram, adCopy, score, analysis, focusGroup, heatmapData.
-        The focusGroup key should be an array of 3 objects with keys: name, avatar, feedback, sentiment (positive/neutral/negative).
-        The heatmapData key should be an array of objects with keys: x, y, intensity.`;
+        Return ONLY valid JSON.`;
 
       const analysisResponse = await aiInstance.models.generateContent({
         model: model,
@@ -364,8 +358,7 @@ Try it yourself at ${window.location.origin}
         }
       });
 
-      const resultText = (analysisResponse as any).candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const analysis = JSON.parse(resultText || '{}');
+      const analysis = JSON.parse(analysisResponse.text || '{}');
       
       setState(prev => ({
         ...prev,
@@ -380,27 +373,24 @@ Try it yourself at ${window.location.origin}
         } : res)
       }));
     } catch (error: any) {
-      const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
-                          error?.status === 429 ||
-                          error?.message?.toString().toLowerCase().includes('429') || 
-                          error?.message?.toString().toLowerCase().includes('quota') ||
-                          error?.message?.toString().toLowerCase().includes('exhausted');
+      const errStr = error?.message?.toString().toLowerCase() || "";
+      const isQuota = error?.status === 429 || errStr.includes('quota') || errStr.includes('429');
+      const isNotFound = error?.status === 404 || errStr.includes('not found') || errStr.includes('404');
 
-      if (isQuotaError && retries > 0) {
-        const waitTime = (4 - retries) * 10000;
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+      if (isQuota && retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
         return generateAnalysisWithModel(resultId, image, model, retries - 1);
       }
       
-      // Fallback model if the flash limit is hit
-      if (model.includes('flash') && isQuotaError) {
+      // Fallback model for analysis if flash fails or isn't found
+      if (model === 'gemini-flash-latest' && (isNotFound || isQuota)) {
         return generateAnalysisWithModel(resultId, image, 'gemini-3.1-pro-preview', 1);
       }
 
       console.error("Analysis failed:", error);
       setState(prev => ({
         ...prev,
-        error: "Marketing analysis failed. You can still download the image, but AI insights are unavailable.",
+        error: "AI Insights failed. You can still download the image.",
         results: prev.results.map(res => res.id === resultId ? { ...res, isAnalyzing: false } : res)
       }));
     }
@@ -466,57 +456,68 @@ Try it yourself at ${window.location.origin}
         { chapter: undefined, prompt: `${basePrompt} Variation 4: Creative artistic shot.` }
       ];
 
-      // Sequential Image Generation with Retry and Backoff to avoid 429
+      // Sequential Image Generation with Retry and Model Fallbacks
       const generateSingleImage = async (v: any, index: number, retries = 3): Promise<string> => {
-        try {
-          const aiInstance = getAI();
-          const parts: any[] = [
-            { inlineData: { data: state.productImage!.split(',')[1], mimeType: 'image/png' } },
-            { text: v.prompt }
-          ];
+        // Preference order for image generation models according to skill
+        const modelsToTry = [
+          'gemini-2.5-flash-image',
+          'gemini-2.0-flash-exp',
+          'gemini-2.0-flash',
+          'gemini-3.1-flash-image-preview'
+        ];
 
-          if (state.isTryOnMode && state.userImage) {
-            parts.push({ inlineData: { data: state.userImage.split(',')[1], mimeType: 'image/png' } });
-          }
+        let lastError: any = null;
 
-          const response = await aiInstance.models.generateContent({
-            // Use the standard model name from the gemini-api skill for image generation
-            model: 'gemini-2.5-flash-image',
-            contents: { parts },
-            config: {
-              imageConfig: {
-                aspectRatio: state.aspectRatio as any
+        for (const modelName of modelsToTry) {
+          try {
+            const aiInstance = getAI();
+            const parts: any[] = [
+              { inlineData: { data: state.productImage!.split(',')[1], mimeType: 'image/png' } },
+              { text: v.prompt }
+            ];
+
+            if (state.isTryOnMode && state.userImage) {
+              parts.push({ inlineData: { data: state.userImage.split(',')[1], mimeType: 'image/png' } });
+            }
+
+            const response = await aiInstance.models.generateContent({
+              model: modelName,
+              contents: { parts },
+              config: {
+                imageConfig: {
+                  aspectRatio: state.aspectRatio as any
+                }
+              }
+            });
+
+            if (response.candidates?.[0]?.content?.parts) {
+              for (const part of response.candidates[0].content.parts) {
+                if (part.inlineData && part.inlineData.mimeType?.startsWith('image/')) {
+                  return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                }
               }
             }
-          });
+            
+            throw new Error(`Model ${modelName} returned no image.`);
+          } catch (error: any) {
+            lastError = error;
+            const errStr = error?.message?.toString().toLowerCase() || "";
+            const isQuota = error?.status === 429 || errStr.includes('quota') || errStr.includes('429');
+            const isNotFound = error?.status === 404 || errStr.includes('not found') || errStr.includes('404');
+            
+            console.warn(`Model ${modelName} failed:`, error);
 
-          const candidates = (response as any).candidates;
-          if (candidates && candidates.length > 0) {
-            for (const part of candidates[0].content?.parts || []) {
-              if (part.inlineData && part.inlineData.mimeType.startsWith('image/')) {
-                return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-              }
+            if (isQuota && retries > 0) {
+              await new Promise(r => setTimeout(r, 10000));
+              return generateSingleImage(v, index, retries - 1);
             }
+            
+            // Continue to next model if not found or other non-quota error
+            continue;
           }
-          
-          console.error("Detailed Response Structure:", JSON.stringify(response, null, 2));
-          throw new Error("No image was returned. This may be due to safety filters (e.g. people in images) or a model configuration issue.");
-        } catch (error: any) {
-          const isQuotaError = error?.status === 'RESOURCE_EXHAUSTED' || 
-                              error?.status === 429 ||
-                              error?.message?.toString().toLowerCase().includes('429') || 
-                              error?.message?.toString().toLowerCase().includes('quota') ||
-                              error?.message?.toString().toLowerCase().includes('exhausted');
-          
-          if (isQuotaError && retries > 0) {
-            // Aggressive backoff for free-tier users hitting RPM limits
-            const waitTime = (4 - retries) * 10000; // 10s, 20s, 30s
-            console.warn(`Quota hit for image ${index + 1}, retrying in ${waitTime}ms...`);
-            await new Promise(r => setTimeout(r, waitTime));
-            return generateSingleImage(v, index, retries - 1);
-          }
-          throw error;
         }
+
+        throw lastError || new Error("All image generation models failed.");
       };
 
       // Initialize results state with placeholders early
